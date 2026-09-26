@@ -1,15 +1,17 @@
 import { useMemo, useState } from 'react'
 import { Alert, Card, Col, Row, Segmented, Space, Table, Tag, Typography } from 'antd'
-import type { BeeColony, DropPoint, Orchard } from '@/types'
+import type { BeeColony, DropPoint, Orchard, ReceiptStatus } from '@/types'
 import FlowerWindowBar from '@/components/common/FlowerWindowBar'
 import RouteMap from '@/components/common/RouteMap'
 import StatusTag from '@/components/common/StatusTag'
+import ReceiptTag from '@/components/common/ReceiptTag'
 import { usePersistentStore } from '@/hooks/usePersistentStore'
 import { orchardStore } from '@/stores/orchardStore'
 import { colonyStore } from '@/stores/colonyStore'
 import { droppointStore } from '@/stores/droppointStore'
 import { routeStore } from '@/stores/routeStore'
 import { bloomDays, flowerWindowOverlap } from '@/utils/geo'
+import { occupancyOf } from '@/utils/placement'
 import { suggestColonyBoxes } from '@/types'
 
 interface Placement {
@@ -18,6 +20,10 @@ interface Placement {
   dropCode: string
   start: string
   end: string
+  /** 执行回执状态；未登记回执为 undefined（按原计划判断） */
+  receiptStatus: ReceiptStatus | undefined
+  actualBoxes?: number
+  source: '计划' | '回执'
 }
 
 interface ConflictItem {
@@ -36,6 +42,8 @@ interface ScheduleRow {
   placedCodes: string[]
   dropCodes: string[]
   conflicted: boolean
+  /** 该地块下的投放点执行情况（含已撤场） */
+  pointSummaries: { point: DropPoint; occupied: boolean; effectiveEnd: string }[]
 }
 
 /** 季内授粉安排总表：日期条带展示花期与已投放群体，冲突处标红 */
@@ -46,17 +54,25 @@ export default function SchedulePage(): JSX.Element {
   const routes = usePersistentStore(routeStore, (state) => state.rows)
   const [scope, setScope] = useState<'all' | 'conflict'>('all')
 
-  /** 由投放点的群号安排 + 蜂群当前所在地块，汇总出「某群在某地块」的时间占用 */
+  /**
+   * 由投放点的群号安排 + 执行回执，汇总出「某群在某地块」的有效时间占用：
+   * 待投放 / 在园 / 延期（按新撤场日）计入；已撤场释放，可安排到下一地块；未登记回执按原计划。
+   */
   const placements = useMemo<Placement[]>(() => {
     const list: Placement[] = []
     dropPoints.forEach((point: DropPoint) => {
+      const window = occupancyOf(point)
+      if (!window.occupied) return
       point.colonyCodes.forEach((code) => {
         list.push({
           colonyCode: code,
           orchardId: point.orchardId,
           dropCode: point.code,
-          start: point.dropWindow,
-          end: point.withdrawTime
+          start: window.start,
+          end: window.end,
+          receiptStatus: point.receipt?.status,
+          actualBoxes: point.receipt?.actualBoxes,
+          source: window.source === '计划' ? '计划' : '回执'
         })
       })
     })
@@ -71,7 +87,9 @@ export default function SchedulePage(): JSX.Element {
         orchardId: colony.currentOrchardId,
         dropCode: '（当前所在）',
         start: orchard.bloomStart,
-        end: orchard.bloomEnd
+        end: orchard.bloomEnd,
+        receiptStatus: undefined,
+        source: '计划'
       })
     })
     return list
@@ -100,6 +118,12 @@ export default function SchedulePage(): JSX.Element {
     () =>
       orchards.map((orchard) => {
         const related = placements.filter((item) => item.orchardId === orchard.id)
+        const pointSummaries = dropPoints
+          .filter((point) => point.orchardId === orchard.id)
+          .map((point) => {
+            const window = occupancyOf(point)
+            return { point, occupied: window.occupied, effectiveEnd: window.end }
+          })
         return {
           key: orchard.id,
           orchard,
@@ -107,10 +131,11 @@ export default function SchedulePage(): JSX.Element {
           suggest: suggestColonyBoxes(orchard),
           placedCodes: Array.from(new Set(related.map((item) => item.colonyCode))),
           dropCodes: Array.from(new Set(related.map((item) => item.dropCode))),
-          conflicted: conflicts.some((item) => item.a.orchardId === orchard.id || item.b.orchardId === orchard.id)
+          conflicted: conflicts.some((item) => item.a.orchardId === orchard.id || item.b.orchardId === orchard.id),
+          pointSummaries
         }
       }),
-    [orchards, placements, conflicts]
+    [orchards, placements, conflicts, dropPoints]
   )
 
   const visibleRows = scope === 'conflict' ? rows.filter((row) => row.conflicted) : rows
@@ -126,7 +151,7 @@ export default function SchedulePage(): JSX.Element {
         <div>
           <h2 className="page-title">季内授粉安排总表</h2>
           <p className="page-sub">
-            按日期条带展示各地块盛花期与已投放群体；同一蜂群在同一天被排入花期重叠的两个地块时进入冲突列表并标红。
+            按日期条带展示各地块盛花期与已投放群体；占用只计「待投放 / 在园 / 延期」（延期按新撤场日），已撤场群体释放可安排到下一地块，未登记回执仍按原计划判断。同一蜂群在同一天被排入花期重叠的两个地块时进入冲突列表并标红。
           </p>
         </div>
         <Segmented
@@ -172,10 +197,28 @@ export default function SchedulePage(): JSX.Element {
                     {row.orchard.accessibility}
                   </Tag>
                   {row.placedCodes.length > 0 ? (
-                    row.placedCodes.map((code) => <Tag key={code} color="cyan">已投放 {code}</Tag>)
+                    row.placedCodes.map((code) => {
+                      const placement = placements.find((item) => item.orchardId === row.orchard.id && item.colonyCode === code)
+                      const color =
+                        placement?.receiptStatus === '在园'
+                          ? 'green'
+                          : placement?.receiptStatus === '待投放'
+                            ? 'gold'
+                            : placement?.receiptStatus === '延期'
+                              ? 'orange'
+                              : 'cyan'
+                      const suffix = placement?.receiptStatus ? `（${placement.receiptStatus}）` : ''
+                      return (
+                        <Tag key={code} color={color}>
+                          {code}
+                          {suffix}
+                        </Tag>
+                      )
+                    })
                   ) : (
                     <Tag>尚未安排群体</Tag>
                   )}
+                  {row.pointSummaries.some((item) => !item.occupied) ? <Tag color="blue">含已撤场（已释放）</Tag> : null}
                   {row.conflicted ? <Tag color="red">存在冲突</Tag> : null}
                 </Space>
               </div>
@@ -220,6 +263,32 @@ export default function SchedulePage(): JSX.Element {
                   {record.placedCodes.length > 0 ? record.placedCodes.map((code) => <Tag key={code}>{code}</Tag>) : <span>—</span>}
                 </Space>
               )
+            },
+            {
+              title: '执行情况（有效占用）',
+              key: 'receipt',
+              width: 280,
+              render: (_, record: ScheduleRow) => {
+                if (record.pointSummaries.length === 0) return <span>—</span>
+                return (
+                  <Space direction="vertical" size={2}>
+                    {record.pointSummaries.map(({ point, occupied, effectiveEnd }) => (
+                      <Space key={point.id} size={4} wrap>
+                        <Tag>{point.code}</Tag>
+                        {point.receipt ? (
+                          <ReceiptTag status={point.receipt.status} />
+                        ) : (
+                          <Tag>未登记·按计划</Tag>
+                        )}
+                        <Typography.Text style={{ fontSize: 12 }} type={occupied ? undefined : 'secondary'}>
+                          {point.receipt ? `${point.receipt.actualBoxes}/${point.capacityBoxes} 箱 · ` : `${point.capacityBoxes} 箱 · `}
+                          {occupied ? `占用至 ${effectiveEnd}` : `已于 ${point.receipt?.withdrewAt || '—'} 撤场，群体可再安排`}
+                        </Typography.Text>
+                      </Space>
+                    ))}
+                  </Space>
+                )
+              }
             },
             {
               title: '状态',

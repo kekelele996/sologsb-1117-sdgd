@@ -4,7 +4,7 @@ import Dexie, { type Table } from 'dexie'
 import type { BeeColony, DropPoint, Orchard, TransitRoute } from '@/types'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
@@ -47,6 +47,14 @@ class BeeRouteDb extends Dexie {
             }
           })
       })
+    // v3：投放点新增「执行回执」（可选字段，历史投放点无回执时按原计划时间窗占用），索引不变
+    this.version(SCHEMA_VERSION).stores({
+      orchards: 'id, name, crop, bloomStart',
+      colonies: 'id, code, status, currentOrchardId',
+      dropPoints: 'id, orchardId, code, dropWindow',
+      routes: 'id, fromDropId, toDropId, departAt',
+      meta: 'key'
+    })
   }
 }
 
@@ -189,7 +197,16 @@ export async function seedDemoData(): Promise<void> {
       dropWindow: `${year}-04-07`,
       withdrawTime: `${year}-04-19`,
       owner: '周园主',
-      colonyCodes: ['Q-01']
+      colonyCodes: ['Q-01'],
+      receipt: {
+        status: '在园',
+        actualBoxes: 8,
+        exceptionNote: '',
+        extendedWithdrawTime: '',
+        arrivedAt: `${year}-04-07`,
+        withdrewAt: '',
+        recordedAt: `${year}-04-07 18:20`
+      }
     },
     {
       id: 'dp_b01',
@@ -203,7 +220,16 @@ export async function seedDemoData(): Promise<void> {
       dropWindow: `${year}-03-27`,
       withdrawTime: `${year}-04-13`,
       owner: '合作社',
-      colonyCodes: ['Q-02']
+      colonyCodes: ['Q-02'],
+      receipt: {
+        status: '已撤场',
+        actualBoxes: 11,
+        exceptionNote: '有 1 群群势偏弱提前回场，可转投西沟樱桃坡',
+        extendedWithdrawTime: '',
+        arrivedAt: `${year}-03-27`,
+        withdrewAt: `${year}-04-12`,
+        recordedAt: `${year}-04-12 16:40`
+      }
     },
     {
       id: 'dp_c01',
@@ -217,7 +243,16 @@ export async function seedDemoData(): Promise<void> {
       dropWindow: `${year}-04-11`,
       withdrawTime: `${year}-04-22`,
       owner: '李园主',
-      colonyCodes: ['Q-02']
+      colonyCodes: ['Q-02'],
+      receipt: {
+        status: '延期',
+        actualBoxes: 6,
+        exceptionNote: '樱桃花期遇低温拉长，需延后 3 天撤场',
+        extendedWithdrawTime: `${year}-04-25`,
+        arrivedAt: `${year}-04-11`,
+        withdrewAt: '',
+        recordedAt: `${year}-04-20 09:15`
+      }
     }
   ])
 

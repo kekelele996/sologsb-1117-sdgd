@@ -71,6 +71,10 @@ body {
 .conflict-row {
   background: #fff1f0;
 }
+.released-row {
+  background: #f5f5f5;
+  color: #8c8c8c;
+}
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }

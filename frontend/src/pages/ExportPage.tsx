@@ -10,6 +10,7 @@ import { droppointStore } from '@/stores/droppointStore'
 import { routeStore } from '@/stores/routeStore'
 import { downloadCsv, downloadJson } from '@/utils/export'
 import { bloomDays } from '@/utils/geo'
+import { occupancyOf } from '@/utils/placement'
 
 interface ScheduleExportRow {
   orchard: string
@@ -22,6 +23,11 @@ interface ScheduleExportRow {
   colonyCode: string
   dropWindow: string
   withdrawTime: string
+  receiptStatus: string
+  actualBoxes: string
+  effectiveEnd: string
+  occupancy: string
+  exceptionNote: string
   owner: string
 }
 
@@ -49,10 +55,39 @@ export default function ExportPage(): JSX.Element {
         suggestBoxes: suggestColonyBoxes(orchard)
       }
       if (points.length === 0) {
-        rows.push({ ...base, dropCode: '—', colonyCode: '—', dropWindow: '—', withdrawTime: '—', owner: '—' })
+        rows.push({
+          ...base,
+          dropCode: '—',
+          colonyCode: '—',
+          dropWindow: '—',
+          withdrawTime: '—',
+          receiptStatus: '—',
+          actualBoxes: '—',
+          effectiveEnd: '—',
+          occupancy: '—',
+          exceptionNote: '—',
+          owner: '—'
+        })
         return
       }
       points.forEach((point: DropPoint) => {
+        const window = occupancyOf(point)
+        // 已撤场：群体释放、可安排下一地块；其余按回执状态与有效占用日导出
+        const receiptFields = point.receipt
+          ? {
+              receiptStatus: point.receipt.status,
+              actualBoxes: String(point.receipt.actualBoxes),
+              effectiveEnd: window.occupied ? window.end : '—',
+              occupancy: window.occupied ? '占用' : '已撤场·群体可再安排',
+              exceptionNote: point.receipt.exceptionNote || '—'
+            }
+          : {
+              receiptStatus: '未登记',
+              actualBoxes: '—',
+              effectiveEnd: window.end,
+              occupancy: '按原计划占用',
+              exceptionNote: '—'
+            }
         if (point.colonyCodes.length === 0) {
           rows.push({
             ...base,
@@ -60,6 +95,7 @@ export default function ExportPage(): JSX.Element {
             colonyCode: '待分配',
             dropWindow: point.dropWindow,
             withdrawTime: point.withdrawTime,
+            ...receiptFields,
             owner: point.owner || '—'
           })
           return
@@ -71,6 +107,7 @@ export default function ExportPage(): JSX.Element {
             colonyCode: code,
             dropWindow: point.dropWindow,
             withdrawTime: point.withdrawTime,
+            ...receiptFields,
             owner: point.owner || '—'
           })
         })
@@ -109,11 +146,16 @@ export default function ExportPage(): JSX.Element {
       { key: 'suggestBoxes', label: '建议箱数' },
       { key: 'dropCode', label: '投放点' },
       { key: 'colonyCode', label: '群号' },
-      { key: 'dropWindow', label: '投放时间窗' },
-      { key: 'withdrawTime', label: '撤场时间' },
+      { key: 'dropWindow', label: '计划投放日' },
+      { key: 'withdrawTime', label: '计划撤场日' },
+      { key: 'receiptStatus', label: '执行回执' },
+      { key: 'actualBoxes', label: '实际箱数' },
+      { key: 'effectiveEnd', label: '有效占用至' },
+      { key: 'occupancy', label: '占用判定' },
+      { key: 'exceptionNote', label: '异常说明' },
       { key: 'owner', label: '责任人' }
     ])
-    message.success('授粉安排清单已导出')
+    message.success('授粉安排清单已导出（已撤场群体标记为可再安排）')
   }
 
   function exportRoutes(): void {
@@ -148,7 +190,7 @@ export default function ExportPage(): JSX.Element {
         <div>
           <h2 className="page-title">导出与打印</h2>
           <p className="page-sub">
-            导出授粉安排清单（地块、群号、投放点、时刻、里程）与转场路线表，或直接使用打印视图现场交底。
+            导出授粉安排清单（地块、群号、投放点、执行回执、有效占用）与转场路线表，或直接使用打印视图现场交底。占用只计待投放 / 在园 / 延期，已撤场群体可安排到下一地块。
           </p>
         </div>
         <Space>
@@ -184,18 +226,46 @@ export default function ExportPage(): JSX.Element {
             rowKey={(record, index) => `${record.orchard}-${record.dropCode}-${record.colonyCode}-${index ?? 0}`}
             size="small"
             pagination={false}
+            rowClassName={(record) => (record.occupancy === '已撤场·群体可再安排' ? 'released-row' : '')}
             columns={[
               { title: '地块', dataIndex: 'orchard', key: 'orchard' },
-              { title: '作物', dataIndex: 'crop', key: 'crop', width: 80 },
-              { title: '面积(亩)', dataIndex: 'areaMu', key: 'area', width: 90 },
+              { title: '作物', dataIndex: 'crop', key: 'crop', width: 70 },
+              { title: '面积(亩)', dataIndex: 'areaMu', key: 'area', width: 80 },
               { title: '盛花期', dataIndex: 'bloom', key: 'bloom' },
-              { title: '天数', dataIndex: 'days', key: 'days', width: 70 },
-              { title: '建议箱数', dataIndex: 'suggestBoxes', key: 'suggest', width: 90 },
-              { title: '投放点', dataIndex: 'dropCode', key: 'drop', width: 90 },
-              { title: '群号', dataIndex: 'colonyCode', key: 'colony', width: 90 },
-              { title: '投放时间窗', dataIndex: 'dropWindow', key: 'window' },
-              { title: '撤场时间', dataIndex: 'withdrawTime', key: 'withdraw' },
-              { title: '责任人', dataIndex: 'owner', key: 'owner' }
+              { title: '天数', dataIndex: 'days', key: 'days', width: 60 },
+              { title: '建议箱数', dataIndex: 'suggestBoxes', key: 'suggest', width: 80 },
+              { title: '投放点', dataIndex: 'dropCode', key: 'drop', width: 80 },
+              { title: '群号', dataIndex: 'colonyCode', key: 'colony', width: 80 },
+              { title: '计划撤场日', dataIndex: 'withdrawTime', key: 'withdraw', width: 100 },
+              {
+                title: '回执',
+                dataIndex: 'receiptStatus',
+                key: 'status',
+                width: 90,
+                render: (value: string) =>
+                  value === '已撤场' ? (
+                    <Tag color="blue">{value}</Tag>
+                  ) : value === '延期' ? (
+                    <Tag color="orange">{value}</Tag>
+                  ) : value === '在园' ? (
+                    <Tag color="green">{value}</Tag>
+                  ) : value === '待投放' ? (
+                    <Tag color="gold">{value}</Tag>
+                  ) : (
+                    <Tag>{value}</Tag>
+                  )
+              },
+              { title: '实际箱数', dataIndex: 'actualBoxes', key: 'actual', width: 80 },
+              { title: '有效占用至', dataIndex: 'effectiveEnd', key: 'effective', width: 100 },
+              {
+                title: '占用判定',
+                dataIndex: 'occupancy',
+                key: 'occupancy',
+                width: 130,
+                render: (value: string) => (value === '已撤场·群体可再安排' ? <Typography.Text type="secondary">{value}</Typography.Text> : value)
+              },
+              { title: '异常说明', dataIndex: 'exceptionNote', key: 'note' },
+              { title: '责任人', dataIndex: 'owner', key: 'owner', width: 80 }
             ]}
           />
         </Card>
@@ -221,7 +291,7 @@ export default function ExportPage(): JSX.Element {
 
       <Row gutter={16}>
         <Col xs={24} md={12}>
-          <Card size="small" title="蜂群投放一览（按群号）">
+          <Card size="small" title="蜂群投放一览（按群号，已撤场群体可再安排）">
             <Space direction="vertical">
               {colonies.map((colony: BeeColony) => {
                 const points = dropPoints.filter((item) => item.colonyCodes.includes(colony.code))
@@ -230,7 +300,18 @@ export default function ExportPage(): JSX.Element {
                     <Tag color="cyan">{colony.code}</Tag>
                     {colony.species} · {colony.strengthFrames} 足框 ·{' '}
                     {points.length > 0
-                      ? points.map((item) => `${item.code}@${orchardName(item.orchardId)}`).join('、')
+                      ? points
+                          .map((item) => {
+                            const window = occupancyOf(item)
+                            if (!window.occupied) {
+                              return `${item.code}@${orchardName(item.orchardId)}（已撤场 ${item.receipt?.withdrewAt || ''}，可再安排）`
+                            }
+                            if (item.receipt?.status === '延期') {
+                              return `${item.code}@${orchardName(item.orchardId)}（延期占用至 ${window.end}）`
+                            }
+                            return `${item.code}@${orchardName(item.orchardId)}${item.receipt ? `（${item.receipt.status} 至 ${window.end}）` : ''}`
+                          })
+                          .join('、')
                       : '尚未安排投放点'}
                   </Typography.Text>
                 )
@@ -241,13 +322,13 @@ export default function ExportPage(): JSX.Element {
         <Col xs={24} md={12}>
           <Card size="small" title="导出说明">
             <Typography.Paragraph style={{ fontSize: 13, marginBottom: 6 }}>
-              1. 授粉安排清单按「地块 × 投放点 × 群号」展开，可直接给蜂场与园主核对；
+              1. 授粉安排清单按「地块 × 投放点 × 群号」展开，含执行回执、实际箱数与有效占用至；仅待投放 / 在园 / 延期（按新撤场日）计占用；
             </Typography.Paragraph>
             <Typography.Paragraph style={{ fontSize: 13, marginBottom: 6 }}>
-              2. 转场路线表包含里程、耗时、车辆与风险备注，实际执行情况可在“转场路线规划”页回填；
+              2. 已撤场的投放点标记为「已撤场·群体可再安排」，对应蜂群可安排到下一地块；未登记回执的投放点仍按原计划时间窗判断；
             </Typography.Paragraph>
             <Typography.Paragraph style={{ fontSize: 13, marginBottom: 0 }}>
-              3. 点击「打印视图」后再选择打印机或另存 PDF；数据全部来自浏览器本地 IndexedDB。
+              3. 转场路线表包含里程、耗时、车辆与风险备注；点击「打印视图」后再选择打印机或另存 PDF，数据全部来自浏览器本地 IndexedDB。
             </Typography.Paragraph>
           </Card>
         </Col>
