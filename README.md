@@ -66,13 +66,13 @@ sologsb-1117/
 │   ├── nginx.conf              # try_files 前端路由回落 + gzip
 │   ├── public/favicon.svg
 │   └── src/
-│       ├── types/              # orchard.ts / colony.ts / droppoint.ts / route.ts / index.ts
-│       ├── stores/             # orchardStore / colonyStore / droppointStore / routeStore（Zustand）
-│       ├── components/common/  # RouteMap / FlowerWindowBar / StatusTag / CoordPicker
+│       ├── types/              # orchard.ts / colony.ts / droppoint.ts / route.ts / receipt.ts / index.ts
+│       ├── stores/             # orchardStore / colonyStore / droppointStore / routeStore / receiptStore（Zustand）
+│       ├── components/common/  # RouteMap / FlowerWindowBar / StatusTag / ReceiptStatusTag / CoordPicker
 │       ├── hooks/              # useAmap / usePersistentStore
 │       ├── pages/              # SchedulePage / OrchardsPage / ColoniesPage / RoutesPage / ExportPage
 │       ├── router/index.tsx
-│       └── utils/              # geo.ts / export.ts / id.ts
+│       └── utils/              # geo.ts / export.ts / id.ts / receipt.ts（生效占用判定）
 ```
 
 ## 六、数据模型与存储
@@ -83,23 +83,31 @@ sologsb-1117/
 | BeeColony 蜂群 | 群号、蜂种、群势（足框）、箱型、当前所在地块、状态（待投放/在园/转场中/回场）、最近检查日期、健康备注 | `colonies` |
 | DropPoint 投放点 | 所属地块、坐标、编号、可容纳箱数、遮阴条件、水源距离、投放时间窗、撤场时间、责任人、安排群号 | `dropPoints` |
 | TransitRoute 转场路线 | 出发/到达投放点、预计里程与耗时、车辆类型、出发时刻、风险备注、实际记录 | `routes` |
+| DropReceipt 执行回执 | 投放点执行状态（待投放/在园/已撤场/延期）、实际箱数、异常说明、延期新撤场日、登记日期（每个投放点一条） | `receipts` |
 
 - 数据库名 `gbbeeroute`，`meta` 表保存 `schemaVersion`；
-- `version(2)` 升级迁移会为历史投放点补齐「可容纳箱数」（默认 8 箱）；
+- `version(2)` 升级迁移会为历史投放点补齐「可容纳箱数」（默认 8 箱）；`version(3)` 新增「执行回执」表；
 - 数据仅存于浏览器本地，容器无状态、不挂载命名卷。
 
 ## 七、主要页面
 
 | 路由 | 功能 |
 | --- | --- |
-| `/` | 季内授粉安排总表：花期条带 + 已投放群体，冲突（同一蜂群被排入花期重叠的不同地块）标红并汇总 |
+| `/` | 季内授粉安排总表：花期条带 + 已投放群体，冲突标红并汇总；登记投放点执行回执（按状态筛选），查看群体可用性 |
 | `/orchards` | 果园地块管理：面积与需蜂强度自动算建议箱数、可达性标记、花期重叠提示、投放点维护（含坐标拾取） |
 | `/colonies` | 蜂群台账：按群势与状态筛选，批量改状态、批量记录检查备注 |
 | `/routes` | 转场路线规划：地图依次选点生成顺序与里程，拖动或上下移动调整顺序并实时重算，写回路线表 |
-| `/export` | 导出授粉安排清单 / 转场路线表（CSV）、全量 JSON 备份，并提供横向/纵向打印视图 |
+| `/export` | 导出授粉安排清单（按生效占用）/ 转场路线表（CSV）、全量 JSON 备份，并提供横向/纵向打印视图 |
 
 ## 八、计算约定
 
 - 建议箱数 = ⌈面积(亩) × 需蜂强度(箱/亩)⌉，最少 1 箱；
 - 转场里程按 Haversine 球面距离累计，耗时按平均 32 km/h + 0.25 h 装卸估算；
 - 花期重叠：两地块盛花期区间交集天数 ≥ 1 即视为重叠；同一群号在重叠期内被排入两个地块 → 冲突。
+
+## 九、执行回执与占用口径
+
+- 每个投放点可登记一条执行回执：状态（待投放 / 在园 / 已撤场 / 延期）、实际箱数、异常说明；延期必须填写新的撤场日（需晚于计划撤场日）；
+- 实际箱数超过点位可容纳箱数时拒存，并提示超出数量；
+- 总表与导出的占用口径：待投放、在园按计划窗口占用，延期按新撤场日占用，已撤场不再占用（群体可安排下一地块），未登记回执仍按原计划判断；
+- 冲突检测、群体可用性与授粉安排清单均按上述生效占用计算。

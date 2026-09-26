@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { DropPoint } from '@/types'
 import { db, deleteRow, loadAll, putRow } from '@/hooks/usePersistentStore'
+import { receiptStore } from '@/stores/receiptStore'
 
 export interface DropPointState {
   rows: DropPoint[]
@@ -25,11 +26,13 @@ export const droppointStore = create<DropPointState>((set, get) => ({
   },
   remove: async (id) => {
     await deleteRow<DropPoint>(db.dropPoints, id)
+    await receiptStore.getState().removeByDropPoint(id)
     await get().hydrate()
   },
   removeByOrchard: async (orchardId) => {
     const targets = get().rows.filter((row) => row.orchardId === orchardId)
     await Promise.all(targets.map((row) => deleteRow<DropPoint>(db.dropPoints, row.id)))
+    await Promise.all(targets.map((row) => receiptStore.getState().removeByDropPoint(row.id)))
     await get().hydrate()
   }
 }))

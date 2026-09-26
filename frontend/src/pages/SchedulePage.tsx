@@ -1,16 +1,22 @@
 import { useMemo, useState } from 'react'
-import { Alert, Card, Col, Row, Segmented, Space, Table, Tag, Typography } from 'antd'
-import type { BeeColony, DropPoint, Orchard } from '@/types'
+import { Alert, Button, Card, Col, DatePicker, Form, Input, InputNumber, Modal, Row, Segmented, Select, Space, Table, Tag, Typography, message } from 'antd'
+import dayjs from 'dayjs'
+import type { BeeColony, DropPoint, DropReceipt, Orchard, ReceiptStatus } from '@/types'
+import { RECEIPT_STATUSES } from '@/types'
 import FlowerWindowBar from '@/components/common/FlowerWindowBar'
 import RouteMap from '@/components/common/RouteMap'
 import StatusTag from '@/components/common/StatusTag'
+import ReceiptStatusTag from '@/components/common/ReceiptStatusTag'
 import { usePersistentStore } from '@/hooks/usePersistentStore'
 import { orchardStore } from '@/stores/orchardStore'
 import { colonyStore } from '@/stores/colonyStore'
 import { droppointStore } from '@/stores/droppointStore'
 import { routeStore } from '@/stores/routeStore'
+import { receiptStore } from '@/stores/receiptStore'
 import { bloomDays, flowerWindowOverlap } from '@/utils/geo'
+import { effectiveOccupancy, receiptMapOf } from '@/utils/receipt'
 import { suggestColonyBoxes } from '@/types'
+import { uid } from '@/utils/id'
 
 interface Placement {
   colonyCode: string
@@ -18,6 +24,8 @@ interface Placement {
   dropCode: string
   start: string
   end: string
+  /** 占用依据：回执或原计划 */
+  source: '计划' | '回执'
 }
 
 interface ConflictItem {
@@ -38,25 +46,55 @@ interface ScheduleRow {
   conflicted: boolean
 }
 
-/** 季内授粉安排总表：日期条带展示花期与已投放群体，冲突处标红 */
+interface ReceiptRow {
+  key: string
+  point: DropPoint
+  orchardName: string
+  receipt?: DropReceipt
+  occupies: boolean
+  effStart: string
+  effEnd: string
+  status: ReceiptStatus | '未登记'
+}
+
+type ReceiptFilter = ReceiptStatus | '未登记' | ''
+
+interface ReceiptFormValues {
+  status: ReceiptStatus
+  actualBoxes: number
+  exceptionNote: string
+  delayedWithdrawDate?: dayjs.Dayjs
+}
+
+/** 季内授粉安排总表：日期条带展示花期与已投放群体，冲突处标红；执行回执决定投放点实际占用 */
 export default function SchedulePage(): JSX.Element {
   const orchards = usePersistentStore(orchardStore, (state) => state.rows)
   const colonies = usePersistentStore(colonyStore, (state) => state.rows)
   const dropPoints = usePersistentStore(droppointStore, (state) => state.rows)
   const routes = usePersistentStore(routeStore, (state) => state.rows)
+  const receipts = usePersistentStore(receiptStore, (state) => state.rows)
   const [scope, setScope] = useState<'all' | 'conflict'>('all')
+  const [receiptFilter, setReceiptFilter] = useState<ReceiptFilter>('')
+  const [receiptPoint, setReceiptPoint] = useState<DropPoint | null>(null)
+  const [receiptForm] = Form.useForm<ReceiptFormValues>()
+  const watchedReceiptStatus = Form.useWatch('status', receiptForm)
 
-  /** 由投放点的群号安排 + 蜂群当前所在地块，汇总出「某群在某地块」的时间占用 */
+  const receiptMap = useMemo(() => receiptMapOf(receipts), [receipts])
+
+  /** 由投放点的群号安排 + 生效占用（回执优先，未登记按计划），汇总出「某群在某地块」的时间占用 */
   const placements = useMemo<Placement[]>(() => {
     const list: Placement[] = []
     dropPoints.forEach((point: DropPoint) => {
+      const occ = effectiveOccupancy(point, receiptMap.get(point.id))
+      if (!occ.occupies) return // 已撤场：群体释放，可安排下一地块
       point.colonyCodes.forEach((code) => {
         list.push({
           colonyCode: code,
           orchardId: point.orchardId,
           dropCode: point.code,
-          start: point.dropWindow,
-          end: point.withdrawTime
+          start: occ.start,
+          end: occ.end,
+          source: occ.source
         })
       })
     })
@@ -71,11 +109,12 @@ export default function SchedulePage(): JSX.Element {
         orchardId: colony.currentOrchardId,
         dropCode: '（当前所在）',
         start: orchard.bloomStart,
-        end: orchard.bloomEnd
+        end: orchard.bloomEnd,
+        source: '计划'
       })
     })
     return list
-  }, [dropPoints, colonies, orchards])
+  }, [dropPoints, colonies, orchards, receiptMap])
 
   /** 同一蜂群同一天被排入两个地块 → 冲突列表 */
   const conflicts = useMemo<ConflictItem[]>(() => {
@@ -113,11 +152,78 @@ export default function SchedulePage(): JSX.Element {
     [orchards, placements, conflicts]
   )
 
+  /** 投放点 × 回执 明细行（含生效占用窗口） */
+  const receiptRows = useMemo<ReceiptRow[]>(
+    () =>
+      dropPoints.map((point) => {
+        const receipt = receiptMap.get(point.id)
+        const occ = effectiveOccupancy(point, receipt)
+        return {
+          key: point.id,
+          point,
+          orchardName: orchardName(point.orchardId),
+          receipt,
+          occupies: occ.occupies,
+          effStart: occ.start,
+          effEnd: occ.end,
+          status: occ.status
+        }
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dropPoints, receiptMap, orchards]
+  )
+
+  const visibleReceiptRows = receiptFilter ? receiptRows.filter((row) => row.status === receiptFilter) : receiptRows
+
+  /** 群体可用性：没有任何生效占用的群体即为可用，可安排下一地块 */
+  const availability = useMemo(
+    () =>
+      colonies.map((colony) => ({
+        colony,
+        active: placements.filter((item) => item.colonyCode === colony.code)
+      })),
+    [colonies, placements]
+  )
+
   const visibleRows = scope === 'conflict' ? rows.filter((row) => row.conflicted) : rows
   const totalSuggest = rows.reduce((sum, row) => sum + row.suggest, 0)
+  const availableCount = availability.filter((item) => item.active.length === 0).length
 
   function orchardName(id: string): string {
     return orchards.find((item) => item.id === id)?.name ?? '未知地块'
+  }
+
+  function openReceipt(point: DropPoint): void {
+    setReceiptPoint(point)
+    const existing = receiptMap.get(point.id)
+    receiptForm.setFieldsValue({
+      status: existing?.status ?? '待投放',
+      actualBoxes: existing ? existing.actualBoxes : point.colonyCodes.length,
+      exceptionNote: existing?.exceptionNote ?? '',
+      delayedWithdrawDate: existing?.delayedWithdrawDate ? dayjs(existing.delayedWithdrawDate) : undefined
+    })
+  }
+
+  async function submitReceipt(): Promise<void> {
+    if (!receiptPoint) return
+    const values = await receiptForm.validateFields()
+    const existing = receiptMap.get(receiptPoint.id)
+    const row: DropReceipt = {
+      id: existing?.id ?? uid('rc'),
+      dropPointId: receiptPoint.id,
+      status: values.status,
+      actualBoxes: Number(values.actualBoxes) || 0,
+      exceptionNote: values.exceptionNote?.trim() ?? '',
+      delayedWithdrawDate: values.status === '延期' && values.delayedWithdrawDate ? values.delayedWithdrawDate.format('YYYY-MM-DD') : '',
+      recordedAt: dayjs().format('YYYY-MM-DD')
+    }
+    try {
+      await receiptStore.getState().save(row, receiptPoint.capacityBoxes)
+      message.success(`投放点 ${receiptPoint.code} 回执已登记（${row.status}，实际 ${row.actualBoxes} 箱）`)
+      setReceiptPoint(null)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '回执保存失败')
+    }
   }
 
   return (
@@ -126,7 +232,7 @@ export default function SchedulePage(): JSX.Element {
         <div>
           <h2 className="page-title">季内授粉安排总表</h2>
           <p className="page-sub">
-            按日期条带展示各地块盛花期与已投放群体；同一蜂群在同一天被排入花期重叠的两个地块时进入冲突列表并标红。
+            按日期条带展示各地块盛花期与已投放群体；占用以执行回执为准（待投放 / 在园 / 延期按新撤场日占用，已撤场释放，未登记按计划），同一蜂群占用期重叠即冲突标红。
           </p>
         </div>
         <Segmented
@@ -190,6 +296,115 @@ export default function SchedulePage(): JSX.Element {
         </Col>
       </Row>
 
+      <Card
+        size="small"
+        title={`投放点执行回执（${visibleReceiptRows.length} / ${receiptRows.length} 个点位）`}
+        extra={
+          <Select<ReceiptFilter>
+            style={{ width: 150 }}
+            value={receiptFilter}
+            onChange={(value) => setReceiptFilter(value)}
+            options={[
+              { value: '', label: '全部回执状态' },
+              ...RECEIPT_STATUSES.map((item) => ({ value: item, label: item })),
+              { value: '未登记', label: '未登记' }
+            ]}
+          />
+        }
+      >
+        <Table<ReceiptRow>
+          dataSource={visibleReceiptRows}
+          rowKey="key"
+          pagination={false}
+          locale={{ emptyText: '没有符合筛选的投放点' }}
+          columns={[
+            { title: '投放点', key: 'code', width: 90, render: (_, record: ReceiptRow) => record.point.code },
+            { title: '地块', dataIndex: 'orchardName', key: 'orchard', width: 130 },
+            {
+              title: '计划窗口',
+              key: 'plan',
+              width: 190,
+              render: (_, record: ReceiptRow) => `${record.point.dropWindow} ~ ${record.point.withdrawTime}`
+            },
+            {
+              title: '安排群号',
+              key: 'codes',
+              render: (_, record: ReceiptRow) => (record.point.colonyCodes.length > 0 ? record.point.colonyCodes.join('、') : '—')
+            },
+            {
+              title: '回执状态',
+              key: 'status',
+              width: 150,
+              render: (_, record: ReceiptRow) => (
+                <ReceiptStatusTag
+                  status={record.status}
+                  hint={record.status === '延期' && record.receipt?.delayedWithdrawDate ? `撤场延至 ${record.receipt.delayedWithdrawDate}` : undefined}
+                />
+              )
+            },
+            {
+              title: '实际箱数',
+              key: 'boxes',
+              width: 110,
+              render: (_, record: ReceiptRow) =>
+                record.receipt ? `${record.receipt.actualBoxes} / ${record.point.capacityBoxes} 箱` : `容量 ${record.point.capacityBoxes} 箱`
+            },
+            {
+              title: '生效占用',
+              key: 'occ',
+              width: 220,
+              render: (_, record: ReceiptRow) =>
+                record.occupies ? (
+                  <span>
+                    {record.effStart} ~ {record.effEnd}{' '}
+                    <Tag color={record.receipt ? 'geekblue' : 'default'}>{record.receipt ? '按回执' : '按计划'}</Tag>
+                  </span>
+                ) : (
+                  <Tag color="green">不占用 · 群体可转下一地块</Tag>
+                )
+            },
+            {
+              title: '异常说明',
+              key: 'note',
+              render: (_, record: ReceiptRow) => record.receipt?.exceptionNote || '—'
+            },
+            {
+              title: '操作',
+              key: 'action',
+              width: 110,
+              render: (_, record: ReceiptRow) => (
+                <Button size="small" type="link" onClick={() => openReceipt(record.point)}>
+                  {record.receipt ? '修改回执' : '登记回执'}
+                </Button>
+              )
+            }
+          ]}
+        />
+      </Card>
+
+      <Card size="small" title={`群体可用性（${availableCount} / ${colonies.length} 群可安排下一地块）`}>
+        <Space direction="vertical" size={6} style={{ width: '100%' }}>
+          {availability.map(({ colony, active }) => (
+            <div key={colony.id}>
+              <Tag color="cyan">{colony.code}</Tag>
+              {active.length === 0 ? (
+                <Tag color="green">可用 · 可安排下一地块</Tag>
+              ) : (
+                active.map((item) => (
+                  <Tag key={`${item.orchardId}-${item.dropCode}`} color="gold" style={{ marginTop: 4 }}>
+                    占用中：{orchardName(item.orchardId)} {item.dropCode} {item.start} ~ {item.end}（{item.source === '回执' ? '按回执' : '按计划'}）
+                  </Tag>
+                ))
+              )}
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {colony.species} · {colony.strengthFrames} 足框
+              </Typography.Text>
+            </div>
+          ))}
+          {colonies.length === 0 ? <Typography.Text type="secondary">暂无蜂群，请先在蜂群台账中登记</Typography.Text> : null}
+        </Space>
+      </Card>
+
       <Card size="small" title={`各地块排程明细（建议箱数合计 ${totalSuggest} 箱）`}>
         <Table<ScheduleRow>
           dataSource={rows}
@@ -243,6 +458,57 @@ export default function SchedulePage(): JSX.Element {
           ))}
         </Space>
       </Card>
+
+      <Modal
+        title={receiptPoint ? `执行回执 · ${receiptPoint.code}（${orchardName(receiptPoint.orchardId)}）` : '执行回执'}
+        open={receiptPoint !== null}
+        onCancel={() => setReceiptPoint(null)}
+        onOk={() => void submitReceipt()}
+        okText="保存回执"
+        width={560}
+        destroyOnClose={false}
+      >
+        {receiptPoint ? (
+          <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+            计划窗口 {receiptPoint.dropWindow} ~ {receiptPoint.withdrawTime} · 点位容量 {receiptPoint.capacityBoxes} 箱 · 安排群号{' '}
+            {receiptPoint.colonyCodes.length > 0 ? receiptPoint.colonyCodes.join('、') : '—'}
+          </Typography.Paragraph>
+        ) : null}
+        <Form form={receiptForm} layout="vertical">
+          <Form.Item name="status" label="执行状态" rules={[{ required: true, message: '请选择执行状态' }]}>
+            <Select options={RECEIPT_STATUSES.map((item) => ({ value: item, label: item }))} />
+          </Form.Item>
+          <Form.Item
+            name="actualBoxes"
+            label={`实际箱数（容量 ${receiptPoint?.capacityBoxes ?? 0} 箱，超出将拒存）`}
+            rules={[{ required: true, message: '请填写实际箱数' }]}
+          >
+            <InputNumber min={0} precision={0} style={{ width: '100%' }} />
+          </Form.Item>
+          {watchedReceiptStatus === '延期' ? (
+            <Form.Item
+              name="delayedWithdrawDate"
+              label="延期后的新撤场日"
+              rules={[
+                {
+                  validator: (_, value: dayjs.Dayjs | undefined) => {
+                    if (!value) return Promise.reject(new Error('延期需填写新的撤场日'))
+                    if (receiptPoint && !value.isAfter(dayjs(receiptPoint.withdrawTime))) {
+                      return Promise.reject(new Error(`新撤场日需晚于计划撤场日 ${receiptPoint.withdrawTime}`))
+                    }
+                    return Promise.resolve()
+                  }
+                }
+              ]}
+            >
+              <DatePicker style={{ width: '100%' }} />
+            </Form.Item>
+          ) : null}
+          <Form.Item name="exceptionNote" label="异常说明">
+            <Input.TextArea rows={2} placeholder="如 连续阴雨撤场顺延 / 到场缺 2 箱 / 花期提前结束" />
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   )
 }

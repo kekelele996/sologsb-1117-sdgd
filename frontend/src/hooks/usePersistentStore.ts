@@ -1,22 +1,23 @@
 import { useStore } from 'zustand'
 import type { StoreApi, UseBoundStore } from 'zustand'
 import Dexie, { type Table } from 'dexie'
-import type { BeeColony, DropPoint, Orchard, TransitRoute } from '@/types'
+import type { BeeColony, DropPoint, DropReceipt, Orchard, TransitRoute } from '@/types'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
 }
 
-/** Dexie 封装：果园 / 蜂群 / 投放点 / 转场路线 四张表 + 元数据表 */
+/** Dexie 封装：果园 / 蜂群 / 投放点 / 转场路线 / 执行回执 五张表 + 元数据表 */
 class BeeRouteDb extends Dexie {
   orchards!: Table<Orchard, string>
   colonies!: Table<BeeColony, string>
   dropPoints!: Table<DropPoint, string>
   routes!: Table<TransitRoute, string>
+  receipts!: Table<DropReceipt, string>
   meta!: Table<MetaRow, string>
 
   constructor() {
@@ -29,7 +30,7 @@ class BeeRouteDb extends Dexie {
       meta: 'key'
     })
     // v2：投放点新增「可容纳箱数」字段，迁移时为历史投放点补齐（按 8 箱兜底）
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         orchards: 'id, name, crop, bloomStart',
         colonies: 'id, code, status, currentOrchardId',
@@ -47,6 +48,15 @@ class BeeRouteDb extends Dexie {
             }
           })
       })
+    // v3：新增「执行回执」表（每个投放点一条：状态 / 实际箱数 / 异常说明 / 延期新撤场日）
+    this.version(SCHEMA_VERSION).stores({
+      orchards: 'id, name, crop, bloomStart',
+      colonies: 'id, code, status, currentOrchardId',
+      dropPoints: 'id, orchardId, code, dropWindow',
+      routes: 'id, fromDropId, toDropId, departAt',
+      receipts: 'id, dropPointId, status',
+      meta: 'key'
+    })
   }
 }
 
@@ -158,8 +168,8 @@ export async function seedDemoData(): Promise<void> {
       species: '意蜂',
       strengthFrames: 6,
       boxType: '标准继箱',
-      currentOrchardId: 'orc_rape',
-      status: '转场中',
+      currentOrchardId: 'orc_cherry',
+      status: '在园',
       lastCheckDate: `${year}-04-05`,
       healthNote: '轻微螨害，转场后需治螨'
     },
@@ -218,6 +228,36 @@ export async function seedDemoData(): Promise<void> {
       withdrawTime: `${year}-04-22`,
       owner: '李园主',
       colonyCodes: ['Q-02']
+    }
+  ])
+
+  await db.receipts.bulkPut([
+    {
+      id: 'rc_a01',
+      dropPointId: 'dp_a01',
+      status: '在园',
+      actualBoxes: 8,
+      exceptionNote: '',
+      delayedWithdrawDate: '',
+      recordedAt: `${year}-04-08`
+    },
+    {
+      id: 'rc_b01',
+      dropPointId: 'dp_b01',
+      status: '已撤场',
+      actualBoxes: 10,
+      exceptionNote: '油菜花期提前结束，04-10 完成撤场，蜂群转西沟樱桃坡',
+      delayedWithdrawDate: '',
+      recordedAt: `${year}-04-10`
+    },
+    {
+      id: 'rc_c01',
+      dropPointId: 'dp_c01',
+      status: '延期',
+      actualBoxes: 6,
+      exceptionNote: '樱桃花期拖长，园主要求延长授粉',
+      delayedWithdrawDate: `${year}-04-25`,
+      recordedAt: `${year}-04-12`
     }
   ])
 
